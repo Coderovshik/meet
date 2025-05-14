@@ -18,6 +18,10 @@ func HandleRegister(us *auth.UserStore) http.HandlerFunc {
 			http.Error(w, "Invalid request", http.StatusBadRequest)
 			return
 		}
+		if creds.Username == "" || creds.Password == "" {
+			http.Error(w, "Username and password are required", http.StatusBadRequest)
+			return
+		}
 		if err := us.CreateUser(r.Context(), creds.Username, creds.Password); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

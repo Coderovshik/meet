@@ -7,14 +7,15 @@ function App() {
   const [roomId, setRoomId] = useState('');
   const [rooms, setRooms] = useState([]);
   const [connected, setConnected] = useState(false);
+  const [selectedRoom, setSelectedRoom] = useState(null);
+  const [hostName, setHostName] = useState(null);
+
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const pcRef = useRef(null);
   const wsRef = useRef(null);
 
-  const getAuthHeader = () => {
-    return 'Basic ' + btoa(username + ':' + password);
-  };
+  const getAuthHeader = () => 'Basic ' + btoa(username + ':' + password);
 
   const fetchRooms = async () => {
     try {
@@ -23,7 +24,7 @@ function App() {
       });
       const data = await response.json();
       setRooms(data);
-    } catch { }
+    } catch {}
   };
 
   useEffect(() => {
@@ -86,13 +87,17 @@ function App() {
 
   const connectToRoom = async (room) => {
     if (connected) return;
+    setSelectedRoom(room);
+
     const ws = new WebSocket(
-      `ws://localhost:8080/ws?room=${encodeURIComponent(room)}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+      `wss://amogus.root-hub.ru/ws?room=${room}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
     );
     wsRef.current = ws;
 
     ws.onopen = () => {
-      const pc = new RTCPeerConnection();
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+      });
       pcRef.current = pc;
 
       pc.onicecandidate = (e) => {
@@ -108,10 +113,22 @@ function App() {
         remoteVideoRef.current.srcObject = e.streams[0];
       };
 
-      navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
-        localVideoRef.current.srcObject = stream;
-        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+      // если Host, то publish media
+      if (rooms.length > 0 && rooms[0] === room && username === rooms[0]) {
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+          localVideoRef.current.srcObject = stream;
+          stream.getTracks().forEach((track) => pc.addTrack(track, stream));
 
+          pc.createOffer().then(offer => {
+            pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({
+              type: 'offer',
+              sdp: offer.sdp,
+            }));
+          });
+        });
+      } else {
+        // слушатель → не отправляем media
         pc.createOffer().then(offer => {
           pc.setLocalDescription(offer);
           ws.send(JSON.stringify({
@@ -119,7 +136,7 @@ function App() {
             sdp: offer.sdp,
           }));
         });
-      });
+      }
     };
 
     ws.onmessage = async (event) => {
@@ -133,6 +150,32 @@ function App() {
     };
 
     setConnected(true);
+  };
+
+  const leaveRoom = () => {
+    if (pcRef.current) {
+      pcRef.current.getSenders().forEach(sender => {
+        if (sender.track) sender.track.stop();
+      });
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+
+    setConnected(false);
+    setSelectedRoom(null);
   };
 
   if (!loggedIn) {
@@ -149,10 +192,14 @@ function App() {
 
   return (
     <div>
-      <h1>SFU Webinar Mode (User: {username})</h1>
+      <h1>SFU Broadcaster (User: {username})</h1>
       <button onClick={logout}>Logout</button><br /><br />
-      <input type="text" placeholder="Room ID" value={roomId} onChange={(e) => setRoomId(e.target.value)} />
-      <button onClick={createRoom}>Create Room</button>
+      {!connected && (
+        <>
+          <input type="text" placeholder="Room ID" value={roomId} onChange={(e) => setRoomId(e.target.value)} />
+          <button onClick={createRoom}>Create Room</button>
+        </>
+      )}
       <h2>Available Rooms</h2>
       <ul>
         {rooms.map((room) => (
@@ -164,6 +211,11 @@ function App() {
           </li>
         ))}
       </ul>
+      {connected && (
+        <div>
+          <button onClick={leaveRoom}>Leave Room</button>
+        </div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
         <div style={{ marginBottom: '10px' }}>
           <h3>Вы (локальное видео)</h3>

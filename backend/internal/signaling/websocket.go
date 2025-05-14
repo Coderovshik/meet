@@ -31,7 +31,6 @@ func HandleWebSocket(manager *rooms.Manager, userStore *auth.UserStore) http.Han
 			return
 		}
 
-		// сохранить username в context
 		r = r.WithContext(context.WithValue(r.Context(), auth.UserContextKey, username))
 
 		room, ok := manager.GetRoom(roomID)
@@ -43,7 +42,12 @@ func HandleWebSocket(manager *rooms.Manager, userStore *auth.UserStore) http.Han
 		conn, _ := upgrader.Upgrade(w, r, nil)
 		defer conn.Close()
 
-		peerConnection, _ := webrtc.NewPeerConnection(webrtc.Configuration{})
+		peerConnection, _ := webrtc.NewPeerConnection(webrtc.Configuration{
+			ICEServers: []webrtc.ICEServer{
+				{URLs: []string{"stun:stun.l.google.com:19302"}},
+			},
+		})
+
 		room.AddPeer(username, peerConnection)
 
 		peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -52,7 +56,7 @@ func HandleWebSocket(manager *rooms.Manager, userStore *auth.UserStore) http.Han
 			room.Mu.Unlock()
 
 			if !isHost {
-				return
+				return // слушатели не могут отправлять треки
 			}
 
 			room.Mu.Lock()

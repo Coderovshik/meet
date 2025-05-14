@@ -27,6 +27,6 @@ func (r *Room) RemovePeer(id string) {
 	defer r.Mu.Unlock()
 	delete(r.Peers, id)
 	if id == r.Host {
-		r.Host = "" // опционально можно сделать переназначение
+		r.Host = "" // опционально можно сделать автоназначение нового host
 	}
 }
