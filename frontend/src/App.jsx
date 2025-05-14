@@ -24,7 +24,7 @@ function App() {
       });
       const data = await response.json();
       setRooms(data);
-    } catch {}
+    } catch { }
   };
 
   useEffect(() => {
@@ -89,6 +89,13 @@ function App() {
     if (connected) return;
     setSelectedRoom(room);
 
+    // 🎯 Получить host из backend
+    const roomResp = await fetch(`/api/rooms?id=${room}`, {
+      headers: { Authorization: getAuthHeader() }
+    });
+    const roomInfo = await roomResp.json();
+    const isHost = (username === roomInfo.host);
+
     const ws = new WebSocket(
       `wss://amogus.root-hub.ru/ws?room=${room}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
     );
@@ -113,8 +120,8 @@ function App() {
         remoteVideoRef.current.srcObject = e.streams[0];
       };
 
-      // если Host, то publish media
-      if (rooms.length > 0 && rooms[0] === room && username === rooms[0]) {
+      // 🎯 Host → включаем камеру
+      if (isHost) {
         navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
           localVideoRef.current.srcObject = stream;
           stream.getTracks().forEach((track) => pc.addTrack(track, stream));
@@ -128,7 +135,7 @@ function App() {
           });
         });
       } else {
-        // слушатель → не отправляем media
+        // слушатель → no camera
         pc.createOffer().then(offer => {
           pc.setLocalDescription(offer);
           ws.send(JSON.stringify({

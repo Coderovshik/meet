@@ -80,6 +80,25 @@ func HandleRooms(manager *rooms.Manager) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 
 		case http.MethodGet:
+			// 🎯 Новый режим → /api/rooms?id=roomName
+			roomID := r.URL.Query().Get("id")
+			if roomID != "" {
+				room, ok := manager.GetRoom(roomID)
+				if !ok {
+					http.Error(w, "Room not found", http.StatusNotFound)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(struct {
+					Host    string `json:"host"`
+					Creator string `json:"creator"`
+				}{
+					Host:    room.Host,
+					Creator: room.Creator,
+				})
+				return
+			}
+
+			// обычный /api/rooms → список
 			rooms := manager.ListRooms()
 			_ = json.NewEncoder(w).Encode(rooms)
 
