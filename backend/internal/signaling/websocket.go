@@ -9,6 +9,7 @@ import (
 	"github.com/Coderovshik/meet/internal/rooms"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -39,10 +40,24 @@ func HandleWebSocket(manager *rooms.Manager, userStore *auth.UserStore) http.Han
 			return
 		}
 
+		// ✅ 1. Upgrade WebSocket first → conn exists
 		conn, _ := upgrader.Upgrade(w, r, nil)
 		defer conn.Close()
 
-		peerConnection, _ := webrtc.NewPeerConnection(webrtc.Configuration{
+		// ✅ 2. Setup mediaEngine + interceptors
+		m := &webrtc.MediaEngine{}
+		_ = m.RegisterDefaultCodecs()
+
+		i := &interceptor.Registry{}
+		_ = webrtc.RegisterDefaultInterceptors(m, i)
+
+		api := webrtc.NewAPI(
+			webrtc.WithMediaEngine(m),
+			webrtc.WithInterceptorRegistry(i),
+		)
+
+		// ✅ 3. Create peerConnection
+		peerConnection, _ := api.NewPeerConnection(webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
 				{URLs: []string{"stun:stun.l.google.com:19302"}},
 			},
@@ -50,13 +65,26 @@ func HandleWebSocket(manager *rooms.Manager, userStore *auth.UserStore) http.Han
 
 		room.AddPeer(username, peerConnection)
 
+		// ✅ 4. Send server → client ICE candidates
+		peerConnection.OnICECandidate(func(c *webrtc.ICECandidate) {
+			if c == nil {
+				return
+			}
+			candidateJSON, _ := json.Marshal(map[string]interface{}{
+				"type":      "candidate",
+				"candidate": c.ToJSON().Candidate,
+			})
+			_ = conn.WriteMessage(websocket.TextMessage, candidateJSON)
+		})
+
+		// ✅ 5. Broadcaster OnTrack logic
 		peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 			room.Mu.Lock()
 			isHost := (username == room.Host)
 			room.Mu.Unlock()
 
 			if !isHost {
-				return // слушатели не могут отправлять треки
+				return // слушатели не передают media
 			}
 
 			room.Mu.Lock()
@@ -80,6 +108,7 @@ func HandleWebSocket(manager *rooms.Manager, userStore *auth.UserStore) http.Han
 			}
 		})
 
+		// ✅ 6. Handle signaling messages
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
@@ -100,6 +129,7 @@ func HandleWebSocket(manager *rooms.Manager, userStore *auth.UserStore) http.Han
 			}
 		}
 
+		// ✅ 7. Cleanup on disconnect
 		room.RemovePeer(username)
 	}
 }
