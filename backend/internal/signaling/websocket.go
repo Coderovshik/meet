@@ -1,135 +1,204 @@
 package signaling
 
 import (
-	"context"
 	"encoding/json"
+	"log"
 	"net/http"
+	"strings"
+	"sync"
 
 	"github.com/Coderovshik/meet/internal/auth"
-	"github.com/Coderovshik/meet/internal/rooms"
 
 	"github.com/gorilla/websocket"
-	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
-var upgrader = websocket.Upgrader{}
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		return strings.Contains(origin, "amogus.root-hub.ru")
+	},
+}
 
-func HandleWebSocket(manager *rooms.Manager, userStore *auth.UserStore) http.HandlerFunc {
+type websocketMessage struct {
+	Event string `json:"event"`
+	Data  string `json:"data"`
+}
+
+func HandleWebSocket(userStore *auth.UserStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		roomID := r.URL.Query().Get("room")
 		username := r.URL.Query().Get("username")
 		password := r.URL.Query().Get("password")
 
-		if roomID == "" || username == "" || password == "" {
+		if username == "" || password == "" {
 			http.Error(w, "Missing credentials or room", http.StatusBadRequest)
 			return
 		}
 
-		valid, _ := userStore.ValidateUser(r.Context(), username, password)
+		valid, err := userStore.ValidateUser(r.Context(), username, password)
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
 		if !valid {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		r = r.WithContext(context.WithValue(r.Context(), auth.UserContextKey, username))
-
-		room, ok := manager.GetRoom(roomID)
-		if !ok {
-			http.Error(w, "Room not found", http.StatusNotFound)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			http.Error(w, "Failed to upgrade connection", http.StatusInternalServerError)
 			return
 		}
+		c := &threadSafeWriter{conn, sync.Mutex{}}
+		defer c.Close()
 
-		// ✅ 1. Upgrade WebSocket first → conn exists
-		conn, _ := upgrader.Upgrade(w, r, nil)
-		defer conn.Close()
+		peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+		if err != nil {
+			log.Printf("Failed to creates a PeerConnection: %v", err)
 
-		// ✅ 2. Setup mediaEngine + interceptors
-		m := &webrtc.MediaEngine{}
-		_ = m.RegisterDefaultCodecs()
+			return
+		}
+		defer peerConnection.Close()
 
-		i := &interceptor.Registry{}
-		_ = webrtc.RegisterDefaultInterceptors(m, i)
+		for _, typ := range []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo, webrtc.RTPCodecTypeAudio} {
+			if _, err := peerConnection.AddTransceiverFromKind(typ, webrtc.RTPTransceiverInit{
+				Direction: webrtc.RTPTransceiverDirectionRecvonly,
+			}); err != nil {
+				log.Printf("Failed to add transceiver: %v", err)
 
-		api := webrtc.NewAPI(
-			webrtc.WithMediaEngine(m),
-			webrtc.WithInterceptorRegistry(i),
-		)
-
-		// ✅ 3. Create peerConnection
-		peerConnection, _ := api.NewPeerConnection(webrtc.Configuration{
-			ICEServers: []webrtc.ICEServer{
-				{URLs: []string{"stun:stun.l.google.com:19302"}},
-			},
-		})
-
-		room.AddPeer(username, peerConnection)
-
-		// ✅ 4. Send server → client ICE candidates
-		peerConnection.OnICECandidate(func(c *webrtc.ICECandidate) {
-			if c == nil {
 				return
-			}
-			candidateJSON, _ := json.Marshal(map[string]interface{}{
-				"type":      "candidate",
-				"candidate": c.ToJSON().Candidate,
-			})
-			_ = conn.WriteMessage(websocket.TextMessage, candidateJSON)
-		})
-
-		// ✅ 5. Broadcaster OnTrack logic
-		peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-			room.Mu.Lock()
-			isHost := (username == room.Host)
-			room.Mu.Unlock()
-
-			if !isHost {
-				return // слушатели не передают media
-			}
-
-			room.Mu.Lock()
-			defer room.Mu.Unlock()
-			for id, pc := range room.Peers {
-				if id == room.Host {
-					continue
-				}
-				localTrack, _ := webrtc.NewTrackLocalStaticRTP(track.Codec().RTPCodecCapability, track.ID(), track.StreamID())
-				_, _ = pc.AddTrack(localTrack)
-				go func() {
-					buf := make([]byte, 1500)
-					for {
-						n, _, err := track.Read(buf)
-						if err != nil {
-							break
-						}
-						_, _ = localTrack.Write(buf[:n])
-					}
-				}()
-			}
-		})
-
-		// ✅ 6. Handle signaling messages
-		for {
-			_, msg, err := conn.ReadMessage()
-			if err != nil {
-				break
-			}
-			var payload map[string]interface{}
-			_ = json.Unmarshal(msg, &payload)
-			switch payload["type"] {
-			case "offer":
-				offer := webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: payload["sdp"].(string)}
-				_ = peerConnection.SetRemoteDescription(offer)
-				answer, _ := peerConnection.CreateAnswer(nil)
-				_ = peerConnection.SetLocalDescription(answer)
-				resp, _ := json.Marshal(map[string]interface{}{"type": "answer", "sdp": answer.SDP})
-				_ = conn.WriteMessage(websocket.TextMessage, resp)
-			case "candidate":
-				_ = peerConnection.AddICECandidate(webrtc.ICECandidateInit{Candidate: payload["candidate"].(string)})
 			}
 		}
 
-		// ✅ 7. Cleanup on disconnect
-		room.RemovePeer(username)
+		listLock.Lock()
+		peerConnections = append(peerConnections, peerConnectionState{peerConnection, c})
+		listLock.Unlock()
+
+		peerConnection.OnICECandidate(func(i *webrtc.ICECandidate) {
+			if i == nil {
+				return
+			}
+
+			candidateString, err := json.Marshal(i.ToJSON())
+			if err != nil {
+				log.Printf("Failed to marshal candidate to json: %v", err)
+
+				return
+			}
+
+			log.Printf("Send candidate to client: %s", candidateString)
+
+			if writeErr := c.WriteJSON(&websocketMessage{
+				Event: "candidate",
+				Data:  string(candidateString),
+			}); writeErr != nil {
+				log.Printf("Failed to write JSON: %v", writeErr)
+			}
+		})
+
+		peerConnection.OnConnectionStateChange(func(p webrtc.PeerConnectionState) {
+			log.Printf("Connection state change: %s", p)
+
+			switch p {
+			case webrtc.PeerConnectionStateFailed:
+				if err := peerConnection.Close(); err != nil {
+					log.Printf("Failed to close PeerConnection: %v", err)
+				}
+			case webrtc.PeerConnectionStateClosed:
+				signalPeerConnections()
+			default:
+			}
+		})
+
+		peerConnection.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+			log.Printf("Got remote track: Kind=%s, ID=%s, PayloadType=%d", t.Kind(), t.ID(), t.PayloadType())
+
+			trackLocal := addTrack(t)
+			defer removeTrack(trackLocal)
+
+			buf := make([]byte, 1500)
+			rtpPkt := &rtp.Packet{}
+
+			for {
+				i, _, err := t.Read(buf)
+				if err != nil {
+					return
+				}
+
+				if err = rtpPkt.Unmarshal(buf[:i]); err != nil {
+					log.Printf("Failed to unmarshal incoming RTP packet: %v", err)
+
+					return
+				}
+
+				rtpPkt.Extension = false
+				rtpPkt.Extensions = nil
+
+				if err = trackLocal.WriteRTP(rtpPkt); err != nil {
+					return
+				}
+			}
+		})
+
+		peerConnection.OnICEConnectionStateChange(func(is webrtc.ICEConnectionState) {
+			log.Printf("ICE connection state changed: %s", is)
+		})
+
+		signalPeerConnections()
+
+		message := &websocketMessage{}
+		for {
+			_, raw, err := c.ReadMessage()
+			if err != nil {
+				log.Printf("Failed to read message: %v", err)
+
+				return
+			}
+
+			log.Printf("Got message: %s", raw)
+
+			if err := json.Unmarshal(raw, &message); err != nil {
+				log.Printf("Failed to unmarshal json to message: %v", err)
+
+				return
+			}
+
+			switch message.Event {
+			case "candidate":
+				candidate := webrtc.ICECandidateInit{}
+				if err := json.Unmarshal([]byte(message.Data), &candidate); err != nil {
+					log.Printf("Failed to unmarshal json to candidate: %v", err)
+
+					return
+				}
+
+				log.Printf("Got candidate: %v", candidate)
+
+				if err := peerConnection.AddICECandidate(candidate); err != nil {
+					log.Printf("Failed to add ICE candidate: %v", err)
+
+					return
+				}
+			case "answer":
+				answer := webrtc.SessionDescription{}
+				if err := json.Unmarshal([]byte(message.Data), &answer); err != nil {
+					log.Printf("Failed to unmarshal json to answer: %v", err)
+
+					return
+				}
+
+				log.Printf("Got answer: %v", answer)
+
+				if err := peerConnection.SetRemoteDescription(answer); err != nil {
+					log.Printf("Failed to set remote description: %v", err)
+
+					return
+				}
+			default:
+				log.Printf("unknown message: %+v", message)
+			}
+		}
 	}
 }

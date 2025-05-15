@@ -1,35 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
+import Room from './Room';
 
 function App() {
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [password, setPassword] = useState(localStorage.getItem('password') || '');
   const [loggedIn, setLoggedIn] = useState(!!username && !!password);
-  const [roomId, setRoomId] = useState('');
-  const [rooms, setRooms] = useState([]);
-  const [connected, setConnected] = useState(false);
-  const [selectedRoom, setSelectedRoom] = useState(null);
-  const [hostName, setHostName] = useState(null);
-
-  const localVideoRef = useRef(null);
-  const remoteVideoRef = useRef(null);
-  const pcRef = useRef(null);
-  const wsRef = useRef(null);
-
-  const getAuthHeader = () => 'Basic ' + btoa(username + ':' + password);
-
-  const fetchRooms = async () => {
-    try {
-      const response = await fetch('/api/rooms', {
-        headers: { Authorization: getAuthHeader() }
-      });
-      const data = await response.json();
-      setRooms(data);
-    } catch { }
-  };
-
-  useEffect(() => {
-    if (loggedIn) fetchRooms();
-  }, [loggedIn]);
 
   const register = async () => {
     try {
@@ -38,9 +13,15 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       });
+
+      if (resp.status !== 201) {
+        alert('Registration failed');
+        return;
+      }
+
       alert('User registered. Now you can login.');
     } catch {
-      alert('Registration failed');
+      alert('Registration error');
     }
   };
 
@@ -51,15 +32,17 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       });
-      if (resp.status === 200) {
-        localStorage.setItem('username', username);
-        localStorage.setItem('password', password);
-        setLoggedIn(true);
-      } else {
-        alert('Неверный логин или пароль');
+
+      if (resp.status !== 200) {
+        alert('Login failed');
+        return;
       }
+
+      localStorage.setItem('username', username);
+      localStorage.setItem('password', password);
+      setLoggedIn(true);
     } catch {
-      alert('Ошибка сервера');
+      alert('Login error');
     }
   };
 
@@ -69,120 +52,6 @@ function App() {
     setUsername('');
     setPassword('');
     setLoggedIn(false);
-  };
-
-  const createRoom = async () => {
-    if (!roomId) return;
-    await fetch('/api/rooms', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: getAuthHeader()
-      },
-      body: JSON.stringify({ ID: roomId }),
-    });
-    setRoomId('');
-    await fetchRooms();
-  };
-
-  const connectToRoom = async (room) => {
-    if (connected) return;
-    setSelectedRoom(room);
-
-    // 🎯 Получить host из backend
-    const roomResp = await fetch(`/api/rooms?id=${room}`, {
-      headers: { Authorization: getAuthHeader() }
-    });
-    const roomInfo = await roomResp.json();
-    const isHost = (username === roomInfo.host);
-
-    const ws = new WebSocket(
-      `wss://amogus.root-hub.ru/ws?room=${room}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-    );
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-      });
-      pcRef.current = pc;
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate) {
-          ws.send(JSON.stringify({
-            type: 'candidate',
-            candidate: e.candidate.candidate,
-          }));
-        }
-      };
-
-      pc.ontrack = (e) => {
-        remoteVideoRef.current.srcObject = e.streams[0];
-      };
-
-      // 🎯 Host → включаем камеру
-      if (isHost) {
-        navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
-          localVideoRef.current.srcObject = stream;
-          stream.getTracks().forEach((track) => pc.addTrack(track, stream));
-
-          pc.createOffer().then(offer => {
-            pc.setLocalDescription(offer);
-            ws.send(JSON.stringify({
-              type: 'offer',
-              sdp: offer.sdp,
-            }));
-          });
-        });
-      } else {
-        // слушатель → no camera
-        pc.createOffer().then(offer => {
-          pc.setLocalDescription(offer);
-          ws.send(JSON.stringify({
-            type: 'offer',
-            sdp: offer.sdp,
-          }));
-        });
-      }
-    };
-
-    ws.onmessage = async (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.type === 'answer') {
-        await pcRef.current.setRemoteDescription(new RTCSessionDescription({
-          type: 'answer',
-          sdp: msg.sdp,
-        }));
-      }
-    };
-
-    setConnected(true);
-  };
-
-  const leaveRoom = () => {
-    if (pcRef.current) {
-      pcRef.current.getSenders().forEach(sender => {
-        if (sender.track) sender.track.stop();
-      });
-      pcRef.current.close();
-      pcRef.current = null;
-    }
-
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-
-    if (localVideoRef.current) {
-      localVideoRef.current.srcObject = null;
-    }
-
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = null;
-    }
-
-    setConnected(false);
-    setSelectedRoom(null);
   };
 
   if (!loggedIn) {
@@ -199,40 +68,9 @@ function App() {
 
   return (
     <div>
-      <h1>SFU Broadcaster (User: {username})</h1>
+      <h1>Meet (User: {username})</h1>
       <button onClick={logout}>Logout</button><br /><br />
-      {!connected && (
-        <>
-          <input type="text" placeholder="Room ID" value={roomId} onChange={(e) => setRoomId(e.target.value)} />
-          <button onClick={createRoom}>Create Room</button>
-        </>
-      )}
-      <h2>Available Rooms</h2>
-      <ul>
-        {rooms.map((room) => (
-          <li key={room}>
-            {room}{' '}
-            <button onClick={() => connectToRoom(room)} disabled={connected}>
-              Connect
-            </button>
-          </li>
-        ))}
-      </ul>
-      {connected && (
-        <div>
-          <button onClick={leaveRoom}>Leave Room</button>
-        </div>
-      )}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-        <div style={{ marginBottom: '10px' }}>
-          <h3>Вы (локальное видео)</h3>
-          <video ref={localVideoRef} autoPlay muted playsInline style={{ width: '300px', border: '1px solid black' }} />
-        </div>
-        <div>
-          <h3>Ведущий (удалённое видео)</h3>
-          <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '300px', border: '1px solid black' }} />
-        </div>
-      </div>
+      <Room username={username} password={password} />
     </div>
   );
 }
