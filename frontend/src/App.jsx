@@ -8,7 +8,7 @@ function App() {
 
   const register = async () => {
     try {
-      await fetch('/api/register', {
+      const resp = await fetch('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
