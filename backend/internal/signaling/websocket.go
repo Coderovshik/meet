@@ -54,7 +54,13 @@ func HandleWebSocket(userStore *auth.UserStore) http.HandlerFunc {
 		c := &threadSafeWriter{conn, sync.Mutex{}}
 		defer c.Close()
 
-		peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+		peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{
+			ICEServers: []webrtc.ICEServer{
+				{
+					URLs: []string{"stun:stun.l.google.com:19302"},
+				},
+			},
+		})
 		if err != nil {
 			log.Printf("Failed to creates a PeerConnection: %v", err)
 
