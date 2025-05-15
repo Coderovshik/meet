@@ -14,7 +14,7 @@ import (
 var (
 	listLock        sync.RWMutex
 	peerConnections []peerConnectionState
-	trackLocals     map[string]*webrtc.TrackLocalStaticRTP
+	trackLocals     map[string]*webrtc.TrackLocalStaticRTP = make(map[string]*webrtc.TrackLocalStaticRTP)
 )
 
 type peerConnectionState struct {
