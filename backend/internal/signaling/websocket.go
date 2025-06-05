@@ -2,9 +2,9 @@ package signaling
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 
 	"github.com/Coderovshik/meet/internal/auth"
@@ -16,8 +16,9 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		return strings.Contains(origin, "amogus.root-hub.ru")
+		// origin := r.Header.Get("Origin")
+		// return strings.Contains(origin, "amogus.root-hub.ru")
+		return true
 	},
 }
 
@@ -26,7 +27,7 @@ type websocketMessage struct {
 	Data  string `json:"data"`
 }
 
-func HandleWebSocket(userStore *auth.UserStore) http.HandlerFunc {
+func HandleWebSocket(userStore *auth.UserStore, logStore *auth.LogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		username := r.URL.Query().Get("username")
 		password := r.URL.Query().Get("password")
@@ -42,6 +43,12 @@ func HandleWebSocket(userStore *auth.UserStore) http.HandlerFunc {
 			return
 		}
 		if !valid {
+			details := fmt.Sprintf("Неудачная попытка подключения к комнате. IP: %s, User-Agent: %s",
+				r.RemoteAddr, r.UserAgent())
+			if err := logStore.AddLog(r.Context(), username, "room_connection_failed", details); err != nil {
+				log.Printf("Ошибка при логировании неудачной попытки подключения к комнате: %v", err)
+			}
+
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -53,6 +60,11 @@ func HandleWebSocket(userStore *auth.UserStore) http.HandlerFunc {
 		}
 		c := &threadSafeWriter{conn, sync.Mutex{}}
 		defer c.Close()
+
+		details := fmt.Sprintf("IP: %s, User-Agent: %s", r.RemoteAddr, r.UserAgent())
+		if err := logStore.AddLog(r.Context(), username, "room_connection", details); err != nil {
+			log.Printf("Ошибка при логировании подключения к комнате: %v", err)
+		}
 
 		peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{
 			ICEServers: []webrtc.ICEServer{
@@ -66,7 +78,13 @@ func HandleWebSocket(userStore *auth.UserStore) http.HandlerFunc {
 
 			return
 		}
-		defer peerConnection.Close()
+		defer func() {
+			disconnectDetails := fmt.Sprintf("IP: %s", r.RemoteAddr)
+			if closeErr := logStore.AddLog(r.Context(), username, "room_disconnection", disconnectDetails); closeErr != nil {
+				log.Printf("Ошибка при логировании отключения от комнаты: %v", closeErr)
+			}
+			peerConnection.Close()
+		}()
 
 		for _, typ := range []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo, webrtc.RTPCodecTypeAudio} {
 			if _, err := peerConnection.AddTransceiverFromKind(typ, webrtc.RTPTransceiverInit{
@@ -120,6 +138,11 @@ func HandleWebSocket(userStore *auth.UserStore) http.HandlerFunc {
 
 		peerConnection.OnTrack(func(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 			log.Printf("Got remote track: Kind=%s, ID=%s, PayloadType=%d", t.Kind(), t.ID(), t.PayloadType())
+
+			trackDetails := fmt.Sprintf("Track kind: %s, ID: %s", t.Kind(), t.ID())
+			if err := logStore.AddLog(r.Context(), username, "add_track", trackDetails); err != nil {
+				log.Printf("Ошибка при логировании добавления трека: %v", err)
+			}
 
 			trackLocal := addTrack(t)
 			defer removeTrack(trackLocal)
