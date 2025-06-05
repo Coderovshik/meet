@@ -1,77 +1,127 @@
-import React, { useState } from 'react';
-import Room from './Room';
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import Login from './components/Login';
+import Register from './components/Register';
+import Room from './components/Room';
+import UserLogs from './components/UserLogs';
+import Navbar from './components/Navbar';
+import './App.css';
 
 function App() {
   const [username, setUsername] = useState(localStorage.getItem('username') || '');
   const [password, setPassword] = useState(localStorage.getItem('password') || '');
-  const [loggedIn, setLoggedIn] = useState(!!username && !!password);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const register = async () => {
-    try {
-      const resp = await fetch('/api/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
+  useEffect(() => {
+    // Проверяем аутентификацию при загрузке
+    const checkAuth = async () => {
+      if (username && password) {
+        try {
+          const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+          });
 
-      if (resp.status !== 201) {
-        alert('Registration failed');
-        return;
+          setIsAuthenticated(response.status === 200);
+        } catch (error) {
+          console.error('Auth check error:', error);
+          setIsAuthenticated(false);
+        }
+      } else {
+        setIsAuthenticated(false);
       }
+      setLoading(false);
+    };
 
-      alert('User registered. Now you can login.');
-    } catch {
-      alert('Registration error');
-    }
+    checkAuth();
+  }, [username, password]);
+
+  const handleLogin = (username, password) => {
+    setUsername(username);
+    setPassword(password);
+    setIsAuthenticated(true);
   };
 
-  const login = async () => {
-    try {
-      const resp = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-
-      if (resp.status !== 200) {
-        alert('Login failed');
-        return;
-      }
-
-      localStorage.setItem('username', username);
-      localStorage.setItem('password', password);
-      setLoggedIn(true);
-    } catch {
-      alert('Login error');
-    }
-  };
-
-  const logout = () => {
+  const handleLogout = () => {
     localStorage.removeItem('username');
     localStorage.removeItem('password');
     setUsername('');
     setPassword('');
-    setLoggedIn(false);
+    setIsAuthenticated(false);
   };
 
-  if (!loggedIn) {
+  if (loading) {
     return (
-      <div>
-        <h1>Login / Register</h1>
-        <input type="text" placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} /><br />
-        <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} /><br />
-        <button onClick={login}>Login</button>
-        <button onClick={register}>Register</button>
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>Загрузка...</p>
       </div>
     );
   }
 
   return (
-    <div>
-      <h1>Meet (User: {username})</h1>
-      <button onClick={logout}>Logout</button><br /><br />
-      <Room username={username} password={password} />
-    </div>
+    <Router>
+      <div className="app-container">
+        {isAuthenticated && (
+          <Navbar username={username} onLogout={handleLogout} />
+        )}
+        
+        <main className="main-content">
+          <Routes>
+            <Route 
+              path="/login" 
+              element={
+                isAuthenticated ? 
+                <Navigate to="/room" replace /> : 
+                <Login onLogin={handleLogin} />
+              } 
+            />
+            
+            <Route 
+              path="/register" 
+              element={
+                isAuthenticated ? 
+                <Navigate to="/room" replace /> : 
+                <Register />
+              } 
+            />
+            
+            <Route 
+              path="/room" 
+              element={
+                isAuthenticated ? 
+                <Room username={username} password={password} /> : 
+                <Navigate to="/login" replace />
+              } 
+            />
+            
+            <Route 
+              path="/logs" 
+              element={
+                isAuthenticated ? 
+                <UserLogs username={username} password={password} /> : 
+                <Navigate to="/login" replace />
+              } 
+            />
+            
+            <Route 
+              path="*" 
+              element={
+                isAuthenticated ? 
+                <Navigate to="/room" replace /> : 
+                <Navigate to="/login" replace />
+              } 
+            />
+          </Routes>
+        </main>
+        
+        <footer className="app-footer">
+          <p>&copy; {new Date().getFullYear()} Meet - Сервис видеоконференций</p>
+        </footer>
+      </div>
+    </Router>
   );
 }
 
